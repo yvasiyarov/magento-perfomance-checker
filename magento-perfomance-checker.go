@@ -7,7 +7,21 @@ import (
     "time"
     "io/ioutil"
     "net/http"
+    "flag"
+    "runtime"
+    "strconv"
 )
+
+var mysqlPort = flag.Int("mysql_port", 3306, "MySQL port")
+var mysqlHost = flag.String("mysql_host", "localhost", "MySQL host")
+var mysqlLogin = flag.String("mysql_login", "root", "MySQL login")
+var mysqlPassword = flag.String("mysql_password", "root", "MySQL password")
+
+var magentoDatabase = flag.String("magento_database", "magento", "Magento database")
+var magentoBaseUrl  = flag.String("magento_base_url", "", "Magento base url")
+
+var numConnections = flag.Int("no_connections", 50, "Number of parallel connections")
+var numCpu = flag.Int("num_cpu", 1, "Number of used CPU")
 
 type UrlType int
 
@@ -29,7 +43,7 @@ type RequestInfo struct {
 
 func NewRequestInfo(url string) *RequestInfo {
     r := new(RequestInfo)
-    r.Url = url
+    r.Url = *magentoBaseUrl + url
     return r
 }
 
@@ -37,42 +51,51 @@ func (this *RequestInfo) makeRequest() {
     start := time.Now()
     this.IsFailed = true
 
+    fmt.Println("Before Query:" + this.Url)
+    defer fmt.Println("Polundra!!")
     resp, err := http.Get(this.Url) 
-
-    this.ResponseCode = resp.StatusCode
-    this.Proto = resp.Proto
-    this.ContentLength = resp.ContentLength
+//    defer resp.Body.Close()
+    fmt.Println("Query:" + this.Url)
 
     if err == nil {
+        fmt.Println("Make HTTP request")
         if _, err := ioutil.ReadAll(resp.Body); err == nil {
-            this.IsFailed = true
-        }
-    }
+            this.IsFailed = false
 
+	    this.ResponseCode = resp.StatusCode
+	    this.Proto = resp.Proto
+	    this.ContentLength = resp.ContentLength
 
-    defer func() {
-        resp.Body.Close()
-        end := time.Now()
-        this.Duration = end.Sub(start)
-        if this.IsFailed {
-            fmt.Print("Url request failed: %v\n", this.Url)
+            end := time.Now()
+            this.Duration = end.Sub(start)
+
+            if this.IsFailed {
+                fmt.Printf("Url request failed: %v\n", this.Url)
+            } else {
+                fmt.Printf("%s %d  %v %d bytes ==> %s\n", this.Proto, this.ResponseCode, this.Duration, this.ContentLength, this.Url)
+            }
         } else {
-            fmt.Print("%s %d  %v secs %d bytes ==> %s\n", this.Proto, this.ResponseCode, this.Duration, this.ContentLength, this.Url)
+            fmt.Println(err)
         }
-    }()
+
+    } else {
+        fmt.Println("HTTP request err")
+        fmt.Println(err)
+    }
 }
 
 func readUrls(inRequestsChanel chan *RequestInfo) error {
-    db := mysql.New("tcp", "", "127.0.0.1:3306", "root", "", "magento_butik")
+    defer close(inRequestsChanel)
+
+    db := mysql.New("tcp", "", *mysqlHost + ":" + strconv.Itoa(*mysqlPort), *mysqlLogin, *mysqlPassword, *magentoDatabase)
     fmt.Println("Connect to magento DB")
     if err := db.Connect(); err != nil {
-        fmt.Println("Can not connect to magento DB")
+        fmt.Printf("Can not connect to magento DB:%v \n", err)
         return err
     }
-    defer func() { inRequestsChanel <- nil}()
     
-    if rows, queryResult, err := db.Query("SELECT request_path, category_id, product_id FROM core_url_write WHERE options <> 'RP' LIMIT 1000"); err != nil {
-        fmt.Println("Can not query urls")
+    if rows, queryResult, err := db.Query("SELECT request_path, category_id, product_id FROM core_url_rewrite WHERE is_system=1 LIMIT 10"); err != nil {
+        fmt.Printf("Can not query urls: %v \n", err)
 
         return err
     } else {
@@ -91,6 +114,7 @@ func readUrls(inRequestsChanel chan *RequestInfo) error {
             }
             inRequestsChanel <- request
         }
+        fmt.Println("All urls sended")
     }
 
     return nil
@@ -98,16 +122,26 @@ func readUrls(inRequestsChanel chan *RequestInfo) error {
 
 func makeRequests(inRequestsChanel chan *RequestInfo, outRequestsChanel chan *RequestInfo, noParallelRoutines int) {
     routines := make(chan int, noParallelRoutines)
-    defer func() { outRequestsChanel <- nil}()
+    ticktes  := make(chan int, noParallelRoutines)
+    defer close(outRequestsChanel)
 
-    for request := <- inRequestsChanel; request != nil; request = <- inRequestsChanel {
+    for request := range inRequestsChanel {
+        if request == nil {
+            break;
+        }
         routines <- 1
         go func(routines chan int, request *RequestInfo, outRequestsChanel chan *RequestInfo) {
             request.makeRequest()
-            <-routines
             outRequestsChanel <- request
+            <- routines
+
+            fmt.Println("One go routine exit")
         }(routines, request, outRequestsChanel)
     }
+    close(routines)
+
+    for _ = range routines { }
+    fmt.Println("make requests exit!")
 }
 
 func calculateStat(outRequestsChanel chan *RequestInfo) {
@@ -117,7 +151,10 @@ func calculateStat(outRequestsChanel chan *RequestInfo) {
     var totalHttpErrors int;
     var totalContentLength int64;
 
-    if request := <- outRequestsChanel; request != nil {
+    for request := range outRequestsChanel {
+        if request == nil {
+            break;
+        }
         if request.IsFailed {
             totalFailed = totalFailed + 1
         } else if request.ResponseCode == 200 {
@@ -127,21 +164,33 @@ func calculateStat(outRequestsChanel chan *RequestInfo) {
         }
         totalContentLength = totalContentLength + request.ContentLength
         totalTime.Add(request.Duration)
-    } else {
-        fmt.Printf("Transactions: %d hits\n", totalFailed + totalSuccess + totalHttpErrors) 
-        fmt.Printf("Availability: %f %\n", 100 - (totalFailed / (totalFailed + totalSuccess + totalHttpErrors)) * 100)
+    }
+ 
+    total := totalFailed + totalSuccess + totalHttpErrors
+    var availability float64
+    if total != 0 {
+        availability = 100.0 - float64(totalFailed / total) * 100.0
+        fmt.Printf("Transactions: %d hits\n", total) 
+        fmt.Printf("Availability: %s %\n", strconv.FormatFloat(availability, 'f', 2, 64))
         fmt.Printf("Elapsed time: %v secs\n", totalTime) 
         fmt.Printf("Data transferred: %d bytes\n", totalContentLength)
 //        fmt.Printf("Data transferred: %d bytes\n", totalContentLength)
- 
+        
+    } else {
+        fmt.Println("No requests was done")
     }
+
+ 
 }
 
 func main() {
+     flag.Parse()
+     runtime.GOMAXPROCS(*numCpu)
+
      inRequestsChanel := make(chan *RequestInfo)
      outRequestsChanel := make(chan *RequestInfo)
 
      go readUrls(inRequestsChanel)
-     go makeRequests(inRequestsChanel, outRequestsChanel, 50)
+     go makeRequests(inRequestsChanel, outRequestsChanel, *numConnections)
      calculateStat(outRequestsChanel)
 }
