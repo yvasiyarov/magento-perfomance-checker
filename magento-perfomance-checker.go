@@ -51,14 +51,10 @@ func (this *RequestInfo) makeRequest() {
     start := time.Now()
     this.IsFailed = true
 
-    fmt.Println("Before Query:" + this.Url)
-    defer fmt.Println("Polundra!!")
     resp, err := http.Get(this.Url) 
-//    defer resp.Body.Close()
-    fmt.Println("Query:" + this.Url)
+    defer resp.Body.Close()
 
     if err == nil {
-        fmt.Println("Make HTTP request")
         if _, err := ioutil.ReadAll(resp.Body); err == nil {
             this.IsFailed = false
 
@@ -79,7 +75,6 @@ func (this *RequestInfo) makeRequest() {
         }
 
     } else {
-        fmt.Println("HTTP request err")
         fmt.Println(err)
     }
 }
@@ -122,25 +117,30 @@ func readUrls(inRequestsChanel chan *RequestInfo) error {
 
 func makeRequests(inRequestsChanel chan *RequestInfo, outRequestsChanel chan *RequestInfo, noParallelRoutines int) {
     routines := make(chan int, noParallelRoutines)
-    ticktes  := make(chan int, noParallelRoutines)
+    numRoutines := 0
+
     defer close(outRequestsChanel)
 
     for request := range inRequestsChanel {
-        if request == nil {
-            break;
+        if numRoutines >= noParallelRoutines {
+            <- routines
+            numRoutines --
         }
-        routines <- 1
+
         go func(routines chan int, request *RequestInfo, outRequestsChanel chan *RequestInfo) {
             request.makeRequest()
             outRequestsChanel <- request
-            <- routines
+            routines <- 1
 
-            fmt.Println("One go routine exit")
         }(routines, request, outRequestsChanel)
+        
+        numRoutines++
     }
-    close(routines)
 
-    for _ = range routines { }
+    for i := 0; i < numRoutines; i++ {
+        <- routines
+    }
+
     fmt.Println("make requests exit!")
 }
 
