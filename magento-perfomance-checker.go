@@ -10,6 +10,7 @@ import (
     "flag"
     "runtime"
     "strconv"
+    "math"
 )
 
 var mysqlPort = flag.Int("mysql_port", 3306, "MySQL port")
@@ -55,12 +56,12 @@ func (this *RequestInfo) makeRequest() {
     defer resp.Body.Close()
 
     if err == nil {
-        if _, err := ioutil.ReadAll(resp.Body); err == nil {
+        if body, err := ioutil.ReadAll(resp.Body); err == nil {
             this.IsFailed = false
 
 	    this.ResponseCode = resp.StatusCode
 	    this.Proto = resp.Proto
-	    this.ContentLength = resp.ContentLength
+	    this.ContentLength = int64(len(body))
 
             end := time.Now()
             this.Duration = end.Sub(start)
@@ -83,13 +84,12 @@ func readUrls(inRequestsChanel chan *RequestInfo) error {
     defer close(inRequestsChanel)
 
     db := mysql.New("tcp", "", *mysqlHost + ":" + strconv.Itoa(*mysqlPort), *mysqlLogin, *mysqlPassword, *magentoDatabase)
-    fmt.Println("Connect to magento DB")
     if err := db.Connect(); err != nil {
         fmt.Printf("Can not connect to magento DB:%v \n", err)
         return err
     }
     
-    if rows, queryResult, err := db.Query("SELECT request_path, category_id, product_id FROM core_url_rewrite WHERE is_system=1 LIMIT 10"); err != nil {
+    if rows, queryResult, err := db.Query("SELECT request_path, category_id, product_id FROM core_url_rewrite WHERE is_system=1"); err != nil {
         fmt.Printf("Can not query urls: %v \n", err)
 
         return err
@@ -109,7 +109,6 @@ func readUrls(inRequestsChanel chan *RequestInfo) error {
             }
             inRequestsChanel <- request
         }
-        fmt.Println("All urls sended")
     }
 
     return nil
@@ -141,16 +140,18 @@ func makeRequests(inRequestsChanel chan *RequestInfo, outRequestsChanel chan *Re
         <- routines
     }
 
-    fmt.Println("make requests exit!")
 }
 
 func calculateStat(outRequestsChanel chan *RequestInfo) {
-    totalTime := new(time.Time);
-    var totalFailed int;
-    var totalSuccess int;
-    var totalHttpErrors int;
-    var totalContentLength int64;
+    var totalTime int64
+    var longestTransactionTime float64
+    var shortesTransactionTime float64
+    var totalFailed int
+    var totalSuccess int
+    var totalHttpErrors int
+    var totalContentLength int64
 
+    shortesTransactionTime = math.MaxFloat64
     for request := range outRequestsChanel {
         if request == nil {
             break;
@@ -163,7 +164,10 @@ func calculateStat(outRequestsChanel chan *RequestInfo) {
             totalHttpErrors = totalHttpErrors + 1
         }
         totalContentLength = totalContentLength + request.ContentLength
-        totalTime.Add(request.Duration)
+        totalTime += request.Duration.Nanoseconds()
+
+        longestTransactionTime = math.Max(longestTransactionTime, float64(request.Duration.Nanoseconds()))
+        shortesTransactionTime = math.Min(shortesTransactionTime, float64(request.Duration.Nanoseconds()))
     }
  
     total := totalFailed + totalSuccess + totalHttpErrors
@@ -171,10 +175,16 @@ func calculateStat(outRequestsChanel chan *RequestInfo) {
     if total != 0 {
         availability = 100.0 - float64(totalFailed / total) * 100.0
         fmt.Printf("Transactions: %d hits\n", total) 
-        fmt.Printf("Availability: %s %\n", strconv.FormatFloat(availability, 'f', 2, 64))
-        fmt.Printf("Elapsed time: %v secs\n", totalTime) 
+        fmt.Printf("Availability: %s %%\n", strconv.FormatFloat(availability, 'f', 2, 64))
+        fmt.Printf("Elapsed time: %s \n", time.Duration(totalTime).String())
         fmt.Printf("Data transferred: %d bytes\n", totalContentLength)
-//        fmt.Printf("Data transferred: %d bytes\n", totalContentLength)
+        fmt.Printf("Response time: %s\n", time.Duration((totalTime / int64(total))).String())
+        fmt.Printf("Transaction rate: %s\n", strconv.FormatFloat(float64(total) / time.Duration(totalTime).Seconds(), 'f', 2, 64))
+        fmt.Printf("Successful transactions: %d\n", totalSuccess)
+        fmt.Printf("Failed transactions: %d\n", totalFailed)
+        fmt.Printf("HTTP error transactions: %d\n", totalHttpErrors)
+        fmt.Printf("Longest transaction: %s \n", time.Duration(int64(longestTransactionTime)).String())
+        fmt.Printf("Shortest transaction: %s \n", time.Duration(int64(shortesTransactionTime)).String())
         
     } else {
         fmt.Println("No requests was done")
