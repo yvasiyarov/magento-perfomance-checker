@@ -11,6 +11,8 @@ import (
     "runtime"
     "strconv"
     "math"
+    "os"
+    "os/signal"
 )
 
 var mysqlPort = flag.Int("mysql_port", 3306, "MySQL port")
@@ -80,7 +82,7 @@ func (this *RequestInfo) makeRequest() {
     }
 }
 
-func readUrls(inRequestsChanel chan *RequestInfo) error {
+func readUrls(inRequestsChanel chan *RequestInfo, osSignal chan os.Signal) error {
     defer close(inRequestsChanel)
 
     db := mysql.New("tcp", "", *mysqlHost + ":" + strconv.Itoa(*mysqlPort), *mysqlLogin, *mysqlPassword, *magentoDatabase)
@@ -99,15 +101,21 @@ func readUrls(inRequestsChanel chan *RequestInfo) error {
         productId   := queryResult.Map("product_id")
         
         for _, row := range rows{
-            request := NewRequestInfo(row.Str(requestPath))
-            if row.Int(productId) != 0 {
-                request.RequestUrlType = UrlTypeProduct
-            } else if row.Int(categoryId) != 0 {
-                request.RequestUrlType = UrlTypeCategory
-            } else {
-                request.RequestUrlType = UrlTypeUnknown
+            select {
+                case sign := <-osSignal:
+                    fmt.Printf("\nCatch signal %#v\n", sign)
+                    return nil
+                default:
+                    request := NewRequestInfo(row.Str(requestPath))
+                    if row.Int(productId) != 0 {
+                        request.RequestUrlType = UrlTypeProduct
+                    } else if row.Int(categoryId) != 0 {
+                        request.RequestUrlType = UrlTypeCategory
+                    } else {
+                        request.RequestUrlType = UrlTypeUnknown
+                    }
+                    inRequestsChanel <- request
             }
-            inRequestsChanel <- request
         }
     }
 
@@ -199,8 +207,11 @@ func main() {
 
      inRequestsChanel := make(chan *RequestInfo)
      outRequestsChanel := make(chan *RequestInfo)
+     osSignal          := make(chan os.Signal, 1)
 
-     go readUrls(inRequestsChanel)
+     signal.Notify(osSignal)
+
+     go readUrls(inRequestsChanel, osSignal)
      go makeRequests(inRequestsChanel, outRequestsChanel, *numConnections)
      calculateStat(outRequestsChanel)
 }
