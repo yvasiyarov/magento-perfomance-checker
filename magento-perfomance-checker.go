@@ -181,7 +181,7 @@ func printStat(stats *Stats, statsType UrlType) {
 	fmt.Printf("|| %s\n", title)
 	fmt.Println("===================================================================")
 
-	availability = 100.0 - float64(stats.TotalFailed/total)*100.0
+	availability = 100.0 - float64((stats.TotalFailed+stats.TotalHttpErrors)/total)*100.0
 	fmt.Printf("Transactions: %d hits\n", total)
 	fmt.Printf("Availability: %s %%\n", strconv.FormatFloat(availability, 'f', 2, 64))
 	fmt.Printf("Elapsed time: %s \n", time.Duration(stats.TotalTime).String())
