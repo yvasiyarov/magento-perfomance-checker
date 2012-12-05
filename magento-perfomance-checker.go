@@ -209,7 +209,7 @@ func calculateStat(outRequestsChanel chan *RequestInfo) {
 		}
 		if request.IsFailed {
 			stats[request.RequestUrlType].TotalFailed++
-		} else if request.ResponseCode == 200 {
+		} else if request.ResponseCode < 500 {
 			stats[request.RequestUrlType].TotalSuccess++
 		} else {
 			stats[request.RequestUrlType].TotalHttpErrors++
