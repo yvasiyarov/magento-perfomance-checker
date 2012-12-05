@@ -222,6 +222,7 @@ func calculateStat(outRequestsChanel chan *RequestInfo) {
 	}
 
 	totalStat := new(Stats)
+        totalStat.ShortesTransactionTime = math.MaxFloat64
 	for i := 1; i < numTypes; i++ {
 		currentType := UrlType(i)
 
